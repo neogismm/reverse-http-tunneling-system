@@ -1,19 +1,9 @@
-import {
-  Controller,
-  All,
-  Req,
-  Res,
-  Body,
-  Param,
-  Query,
-  Dependencies,
-  Bind,
-} from '@nestjs/common';
+import { Controller, All, Req, Res, Dependencies, Bind } from '@nestjs/common';
 import { TunnelGateway } from './tunnel.gateway';
 import { v4 as uuidv4 } from 'uuid';
 
 @Controller()
-@Dependencies(TunnelGateway) // Inject the Gateway
+@Dependencies(TunnelGateway)
 export class TunnelController {
   constructor(tunnelGateway) {
     this.tunnelGateway = tunnelGateway;
@@ -22,29 +12,33 @@ export class TunnelController {
   @All('*')
   @Bind(Req(), Res())
   async handleIncomingRequest(req, res) {
-    // 1. Generate ID
     const requestId = uuidv4();
-    console.log(
-      `[HTTP] Incoming request ${requestId}: ${req.method} ${req.url}`,
-    );
+
+    // READ ROUTING HEADER
+    const targetClientId = req.headers['x-agent-id'];
+
+    if (!targetClientId) {
+      return res.status(400).json({ error: 'Missing header: x-agent-id' });
+    }
+
+    console.log(`[HTTP] ${req.method} ${req.url} -> Agent: ${targetClientId}`);
 
     try {
-      // 2. Forward to the Agent via Gateway
-      const responseFromAgent = await this.tunnelGateway.forwardRequestToAgent(
+      const response = await this.tunnelGateway.forwardRequestToAgent(
         requestId,
         req.method,
         req.url,
         req.body,
+        targetClientId, // Pass it to gateway
       );
 
-      // 3. Send response back to user
-      // responseFromAgent looks like: { status: 200, data: {...}, headers: {...} }
-      return res.status(responseFromAgent.status).json(responseFromAgent.data);
+      return res.status(response.status).json(response.data);
     } catch (error) {
-      console.error(error.message);
-      return res
-        .status(502)
-        .json({ error: 'Bad Gateway - Could not reach Client Agent' });
+      console.error(`Error: ${error.message}`);
+      if (error.message.includes('not connected')) {
+        return res.status(404).json({ error: error.message });
+      }
+      return res.status(502).json({ error: 'Bad Gateway' });
     }
   }
 }

@@ -1,73 +1,89 @@
-import { SubscribeMessage, WebSocketGateway, WebSocketServer, OnGatewayConnection, OnGatewayDisconnect } from '@nestjs/websockets';
+import {
+  SubscribeMessage,
+  WebSocketGateway,
+  WebSocketServer,
+  OnGatewayConnection,
+  OnGatewayDisconnect,
+} from '@nestjs/websockets';
 import { Server } from 'socket.io';
 
-@WebSocketGateway({ cors: true }) // Allow connections from anywhere
+@WebSocketGateway({ cors: true })
 export class TunnelGateway {
   constructor() {
-    this.connectedClient = null; // We only support 1 client for now
-    this.pendingRequests = new Map(); // Store HTTP requests waiting for a reply
+    this.clients = new Map(); // client: <ClientID, SocketID>
+    this.pendingRequests = new Map();
   }
 
   @WebSocketServer()
   server;
 
-  /**
-   * 1. When a Client Agent connects
-   */
+  // 1. connection with Auth Check
   handleConnection(client) {
-    console.log(`Client Agent connected: ${client.id}`);
-    this.connectedClient = client.id;
+    const { token, clientId } = client.handshake.auth;
+
+    // SECURITY CHECK
+    if (token !== 'password1' && token !== 'password2') {
+      console.log(`⛔ Connection rejected: Invalid Token`);
+      client.disconnect();
+      return;
+    }
+
+    if (!clientId) {
+      console.log(`⛔ Connection rejected: Missing Agent ID`);
+      client.disconnect();
+      return;
+    }
+
+    // REGISTER AGENT
+    console.log(`✅ Agent Connected: ${clientId} (Socket: ${client.id})`);
+    this.clients.set(clientId, client.id);
   }
 
   handleDisconnect(client) {
-    console.log(`Client Agent disconnected: ${client.id}`);
-    if (this.connectedClient === client.id) {
-      this.connectedClient = null;
+    // Find and remove the agent from the phonebook
+    for (const [clientId, socketId] of this.clients.entries()) {
+      if (socketId === client.id) {
+        console.log(`❌ Agent Disconnected: ${clientId}`);
+        this.clients.delete(clientId);
+        break;
+      }
     }
   }
 
-  /**
-   * 2. Send a request TO the Client Agent
-   * We return a Promise that resolves when the agent replies.
-   */
-  async forwardRequestToAgent(requestId, method, url, body) {
-    if (!this.connectedClient) {
-      throw new Error('No Client Agent connected');
+  // 2. Forwarding Logic with Routing
+  async forwardRequestToAgent(requestId, method, url, body, targetclientId) {
+    // LOOKUP client
+    const socketId = this.clients.get(targetclientId);
+
+    if (!socketId) {
+      throw new Error(`Agent '${targetclientId}' is not connected`);
     }
 
-    // Create a generic "container" for the response
     return new Promise((resolve, reject) => {
-      // Timeout safety: If agent doesn't reply in 10s, fail.
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(requestId);
         reject(new Error('Gateway Timeout'));
-      }, 10000);
+      }, 5000);
 
-      // Store the "resolve" function to call it later
       this.pendingRequests.set(requestId, { resolve, timeout });
 
-      // Emit the event to the specific client
-      this.server.to(this.connectedClient).emit('request-in', {
+      // Send to SPECIFIC socket
+      this.server.to(socketId).emit('request-in', {
         requestId,
         method,
         url,
-        body
+        body,
       });
     });
   }
 
-  /**
-   * 3. Receive the response FROM the Client Agent
-   */
   @SubscribeMessage('response-out')
   handleResponse(client, payload) {
-    // payload = { requestId, status, data, headers }
     const { requestId, ...responseData } = payload;
-    
     const pending = this.pendingRequests.get(requestId);
     if (pending) {
       clearTimeout(pending.timeout);
-      pending.resolve(responseData); // Resume the HTTP request!
+      pending.resolve(responseData);
       this.pendingRequests.delete(requestId);
     }
   }

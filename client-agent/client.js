@@ -1,56 +1,63 @@
 const io = require("socket.io-client");
 const axios = require("axios");
+const config = require("./config.json");
 
-const TUNNEL_SERVER_URL = "http://localhost:8080";
-const LOCAL_APP_URL = "http://localhost:3000"; 
+// CONFIG
+const { serverUrl, localAppUrl, agents } = config;
 
-console.log("--- Client Agent Starting ---");
-console.log(`Target: ${LOCAL_APP_URL}`);
-console.log(`Tunnel: ${TUNNEL_SERVER_URL}`);
+console.log(`--- Starting Multi-Agent Client System ---`);
+console.log(`Target Server: ${serverUrl}`);
+console.log(`Local App: ${localAppUrl}`);
+console.log(`Agents to spawn: ${agents.length}`);
 
-// 1. Connect to the Tunnel Server
-const socket = io(TUNNEL_SERVER_URL);
-
-socket.on("connect", () => {
-  console.log(`✅ Connected to Tunnel Server! (ID: ${socket.id})`);
+// Spin up an instance for each agent in the config
+agents.forEach((agent) => {
+  startAgentInstance(agent);
 });
 
-socket.on("disconnect", () => {
-  console.log("❌ Disconnected from Tunnel Server");
-});
+function startAgentInstance({ clientId, token }) {
+  console.log(`🟨 Initializing Agent: ${clientId}`);
 
-// 2. Listen for Incoming Requests
-socket.on("request-in", async (payload) => {
-  const { requestId, method, url, body } = payload;
-  console.log(`[⬇️  IN] ${method} ${url} (ID: ${requestId})`);
+  // 1. Connect with Auth
+  const socket = io(serverUrl, {
+    auth: {
+      token: token,
+      clientId: clientId,
+    },
+  });
 
-  try {
-    // 3. Proxy the request to the Local Application
-    // We construct the full URL (e.g., http://localhost:3000/api/users)
-    const response = await axios({
-      method: method,
-      url: `${LOCAL_APP_URL}${url}`,
-      data: body,
-      validateStatus: () => true,
-    });
+  socket.on("connect", () => {
+    console.log(`✅ [${clientId}] Connected to Tunnel Server!`);
+  });
 
-    console.log(`[⬆️ OUT] Responding with ${response.status}`);
+  socket.on("disconnect", () => {
+    console.log(`❌ [${clientId}] Disconnected`);
+  });
 
-    // 4. Send the response back to the Tunnel Server
-    socket.emit("response-out", {
-      requestId,
-      status: response.status,
-      headers: response.headers,
-      data: response.data,
-    });
-  } catch (error) {
-    // If the local app is down or unreachable
-    console.error(`[🔥 ERR] Could not reach local app: ${error.message}`);
+  // 2. Handle Requests
+  socket.on("request-in", async ({ requestId, method, url, body }) => {
+    console.log(`[${clientId}] [JOB] ${method} ${url} (ID: ${requestId})`);
 
-    socket.emit("response-out", {
-      requestId,
-      status: 502, // Bad Gateway
-      data: { error: "Client Agent could not reach Local App" },
-    });
-  }
-});
+    try {
+      const response = await axios({
+        method,
+        url: `${localAppUrl}${url}`,
+        data: body,
+        validateStatus: () => true,
+      });
+
+      socket.emit("response-out", {
+        requestId,
+        status: response.status,
+        data: response.data,
+      });
+    } catch (err) {
+      console.error(`[${clientId}] [ERR] Local App Unreachable`);
+      socket.emit("response-out", {
+        requestId,
+        status: 502,
+        data: { error: "Local Service Down" },
+      });
+    }
+  });
+}

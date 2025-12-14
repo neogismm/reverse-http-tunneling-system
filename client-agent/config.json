@@ -1,0 +1,18 @@
+{
+  "serverUrl": "http://localhost:8080",
+  "localAppUrl": "http://localhost:3000",
+  "agents": [
+    {
+      "clientId": "laptop-1",
+      "token": "password1"
+    },
+    {
+      "clientId": "laptop-2",
+      "token": "password2"
+    },
+    {
+      "clientId": "laptop-3",
+      "token": "password3"
+    }
+  ]
+}

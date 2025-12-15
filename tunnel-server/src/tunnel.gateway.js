@@ -12,35 +12,42 @@ export class TunnelGateway {
   constructor() {
     this.clients = new Map(); // client: <ClientID, SocketID>
     this.pendingRequests = new Map();
+    this.validTokens = ['password1', 'password2']; // Could be loaded from config/DB
   }
 
   @WebSocketServer()
   server;
 
-  // 1. connection with Auth Check
+  // 1. Auth - happens after server is initialized
+  afterInit(server) {
+    server.use((socket, next) => {
+      const { token, clientId } = socket.handshake.auth;
+
+      if (!token || !this.validTokens.includes(token)) {
+        console.log(`⛔ Connection rejected: Invalid Token`);
+        return next(new Error('Authentication failed: Invalid token'));
+      }
+
+      if (!clientId) {
+        console.log(`⛔ Connection rejected: Missing Agent ID`);
+        return next(new Error('Authentication failed: Missing clientId'));
+      }
+
+      // Auth passed - allow connection
+      next();
+    });
+
+    console.log('🚀 WebSocket Gateway initialized with auth middleware');
+  }
+
   handleConnection(client) {
-    const { token, clientId } = client.handshake.auth;
+    const { clientId } = client.handshake.auth;
 
-    // SECURITY CHECK
-    if (token !== 'password1' && token !== 'password2') {
-      console.log(`⛔ Connection rejected: Invalid Token`);
-      client.disconnect();
-      return;
-    }
-
-    if (!clientId) {
-      console.log(`⛔ Connection rejected: Missing Agent ID`);
-      client.disconnect();
-      return;
-    }
-
-    // REGISTER AGENT
     console.log(`✅ Agent Connected: ${clientId} (Socket: ${client.id})`);
     this.clients.set(clientId, client.id);
   }
 
   handleDisconnect(client) {
-    // Find and remove the agent from the phonebook
     for (const [clientId, socketId] of this.clients.entries()) {
       if (socketId === client.id) {
         console.log(`❌ Agent Disconnected: ${clientId}`);

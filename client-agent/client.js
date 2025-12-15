@@ -30,8 +30,12 @@ function startAgentInstance({ clientId, token }) {
     console.log(`✅ [${clientId}] Connected to Tunnel Server!`);
   });
 
-  socket.on("disconnect", () => {
-    console.log(`❌ [${clientId}] Disconnected`);
+  socket.on("connect_error", (err) => {
+    console.log(`🚫 [${clientId}] Connection failed: ${err.message}`);
+  });
+
+  socket.on("disconnect", (reason) => {
+    console.log(`❌ [${clientId}] Disconnected - Reason: ${reason}`);
   });
 
   // 2. Handle Requests

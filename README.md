@@ -1,20 +1,28 @@
-# Reverse HTTP Tunneling System
+# Secure Reverse HTTP Tunneling System
 
-A distributed reverse proxy system that exposes locally running services (behind NATs/Firewalls) to the public internet via a secure WebSocket tunnel. Built with NestJS (Server) and Node.js (Client).
+A distributed reverse proxy system that exposes locally running services (behind NATs/Firewalls) to the public internet via a secure WebSocket tunnel. Built with NestJS (Server), MongoDB (Auth), and Node.js (Client).
+
+## Prerequisites
+
+- **Node.js** (v16+)
+- **MongoDB** (Must be running locally on default port `27017`)
+
+---
 
 ## Quick Start
 
-This project requires Node.js (v16+) and npm. The system consists of three parts. You will need 3 separate terminal windows.
+You will need 3 separate terminal windows.
 
 ### 1. Start the Tunnel Server
 
-This is the public-facing entry point that accepts HTTP requests and routes them to agents.
+This is the public-facing entry point. It now connects to MongoDB for user authentication.
 
 ```bash
 cd tunnel-server
 npm install
 npm run start
-# Server will start on http://localhost:8080
+# Server starts on http://localhost:8080
+# Connected to MongoDB at mongodb://localhost:27017/tunnel-db
 ```
 
 ### 2. Start a Local Application
@@ -22,9 +30,9 @@ npm run start
 If you don't have a local app running, use the included dummy server.
 
 ```bash
-# In a new terminal
+# In Terminal 2
 node dummy-local-app.js
-# Dummy App will listen on http://localhost:3000
+# Dummy App listens on http://localhost:3000
 ```
 
 ### 3. Start the Client Agent
@@ -35,146 +43,212 @@ This connects your local app to the public server.
 cd client-agent
 npm install
 node client.js
-# Should log: "Connected to Tunnel Server!"
+# Logs: "Connected to Tunnel Server!"
 ```
 
-## How to Test
+---
 
-Since this system supports Multiple Clients, you must specify which agent you want to talk to using the `x-agent-id` header.
+## Authentication & Usage Flow
 
-### 1. Basic Health Check
+The system now enforces **JWT Authentication** for all external traffic. You cannot access the tunnel without a valid token.
 
-Run this curl command to forward a request from port 8080 -> Agent -> 3000.
+### Step 1: Register a User
+
+Create a new account to generate your credentials.
 
 ```bash
-curl -H "x-agent-id: laptop-1" http://localhost:8080/api/status
+curl -X POST http://localhost:8080/auth/register \
+     -H "Content-Type: application/json" \
+     -d '{"username": "admin", "password": "password123"}'
 ```
 
-Expected Output:
+### Step 2: Login to Get Token
+
+Exchange your credentials for a secure access token.
+
+```bash
+curl -X POST http://localhost:8080/auth/login \
+     -H "Content-Type: application/json" \
+     -d '{"username": "admin", "password": "password123"}'
+```
+
+**Response:**
+
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1Ni..."
+}
+```
+
+> Copy this token for the next step.
+
+### Step 3: Access the Tunnel
+
+Make requests to your local app through the tunnel using the token. Note that all tunnel traffic is now under the `/api` prefix.
+
+```bash
+# Replace <YOUR_TOKEN> with the actual token string
+curl -H "Authorization: Bearer <YOUR_TOKEN>" \
+     -H "x-agent-id: laptop-1" \
+     http://localhost:8080/api/status
+```
+
+**Expected Output:**
 
 ```json
 {
   "message": "Hello from the hidden local app!",
-  "timestamp": "2023-10-27T10:00:00.000Z"
+  "timestamp": "..."
 }
 ```
 
-### 2. Test Data Submission (POST)
-
-```bash
-curl -X POST http://localhost:8080/users \
-     -H "x-agent-id: laptop-1" \
-     -H "Content-Type: application/json" \
-     -d '{"name": "Alice"}'
-```
-
-### 3. Test Routing (Fail Case)
-
-Try accessing a non-existent agent:
-
-```bash
-curl -H "x-agent-id: laptop-99" http://localhost:8080/
-# Output: 404 Agent 'laptop-99' is not connected
-```
+---
 
 ## System Architecture
 
-The system implements a Multiplexed WebSocket Tunnel.
+The system implements a **Secure Multiplexed WebSocket Tunnel**.
 
-- **Tunnel Server (NestJS):** Acts as the ingress. It does not know how to handle business logic. It simply holds the HTTP request open ("pending state").
-- **Client Agent (Node.js):** Initiates an outbound WebSocket connection to the server. This bypasses firewalls because it is an outbound TCP connection.
+- **Auth Guard:** Intercepts incoming HTTP requests. Validates the JWT against the secret.
+- **Tunnel Controller:** If authorized, pauses the request and forwards it to the Gateway.
+- **Gateway:** Routes the payload to the correct Agent via WebSocket.
 
-### The Handshake
-
-When the Client connects, it authenticates with a token and registers its `agentId`.
-
-### The Flow
-
-1.  User hits Server with `x-agent-id: laptop-1`.
-2.  Server looks up the socket ID for `laptop-1`.
-3.  Server emits `request-in` event to that socket.
-4.  Client receives event, fires axios request to `localhost:3000`.
-5.  Client emits `response-out` back to server.
-6.  Server resolves the pending HTTP request.
+### Secure Request Flow
 
 ```mermaid
 sequenceDiagram
-    participant PublicUser as Public User (Browser/Postman)
-    participant TunnelServer as Tunnel Server (NestJS :8080)
-    participant ClientAgent as Client Agent (Node.js)
-    participant LocalApp as Local App (:3000)
+    participant User as External User
+    participant Auth as Auth Module (:8080)
+    participant Guard as JWT Guard
+    participant Server as Tunnel Controller
+    participant Agent as Client Agent
+    participant App as Local App (:3000)
 
-    Note over ClientAgent, TunnelServer: Phase 1: Connection Establishment
-    ClientAgent->>TunnelServer: 1. Connect WebSocket (Persistent)
-    TunnelServer-->>ClientAgent: 2. Acknowledge Connection (Save Socket ID)
+    Note over User, Auth: Phase 1: Authentication
+    User->>Auth: POST /auth/login
+    Auth-->>User: Returns JWT Token
 
-    Note over PublicUser, LocalApp: Phase 2: Request Flow
-    PublicUser->>TunnelServer: 3. HTTP GET /api/data
-    Note right of TunnelServer: Generate UUID<br/>Create Promise<br/>Store in Pending Map
-
-    TunnelServer->>ClientAgent: 4. WS Event: "request-in" (UUID, Method, URL)
-
-    ClientAgent->>LocalApp: 5. HTTP Proxy Request (Axios)
-    LocalApp-->>ClientAgent: 6. HTTP Response (JSON/HTML)
-
-    ClientAgent->>TunnelServer: 7. WS Event: "response-out" (UUID, Data)
-
-    Note right of TunnelServer: Match UUID<br/>Resolve Promise
-    TunnelServer-->>PublicUser: 8. HTTP Response
+    Note over User, App: Phase 2: Secure Tunneling
+    User->>Guard: GET /api/data (Header: Bearer Token)
+    
+    alt Invalid Token
+        Guard-->>User: 401 Unauthorized
+    else Valid Token
+        Guard->>Server: Allow Request
+        Server->>Agent: WS Event: "request-in"
+        Agent->>App: Forward HTTP Request
+        App-->>Agent: HTTP Response
+        Agent->>Server: WS Event: "response-out"
+        Server-->>User: Final HTTP Response
+    end
 ```
+
+---
 
 ## Project Structure
 
 ```
 🏠
-├── dummy-local-app.js     # Simple HTTP server for testing
+├── dummy-local-app.js      # Simple HTTP server for testing
 │
-├── /tunnel-server         # [NestJS] The Public Server
+├── /tunnel-server          # [NestJS] The Public Server
 │   ├── src/
-│   │   ├── tunnel.gateway.js    # WebSocket Logic (Auth, Routing, Registry)
-│   │   ├── tunnel.controller.js # HTTP Ingress (Request Pausing)
-│   │   └── ...
+│   │   ├── auth/           # [NEW] Authentication Logic
+│   │   │   ├── auth.controller.js  # Login/Register endpoints
+│   │   │   ├── auth.service.js     # Auth business logic
+│   │   │   ├── auth.module.js      # Module configuration
+│   │   │   └── jwt.strategy.js     # Token verification
+│   │   ├── users/          # [NEW] User Database Logic
+│   │   │   ├── users.service.js    # CRUD operations
+│   │   │   ├── users.module.js     # Module configuration
+│   │   │   └── schemas/
+│   │   │       └── user.schema.js  # Mongoose schema
+│   │   ├── tunnel.gateway.js     # WebSocket Logic
+│   │   ├── tunnel.controller.js  # Secured HTTP Ingress
+│   │   ├── app.module.js         # Root module
+│   │   └── main.js               # Application entry point
 │   └── package.json
 │
-└── /client-agent          # [Node.js] The Local Proxy
-    ├── client.js          # Main logic (Socket.io Client + Axios)
-    └── package.json
+└── /client-agent           # [Node.js] The Local Proxy
+    ├── client.js           # Main logic (Socket.io Client + Axios)
+    └── config.json         # Agent configuration
 ```
+
+---
 
 ## Configuration
 
 ### Tunnel Server
 
-Currently configured via hardcoded values in `tunnel.gateway.js` for simplicity.
-
-- Port: 8080
-- Auth Token: `secret-password-123`
+| Setting  | Value                                    |
+| -------- | ---------------------------------------- |
+| Port     | `8080` (Configurable in `main.js`)       |
+| Database | `mongodb://localhost:27017/tunnel-db`    |
+| JWT Secret | Defined in `jwt.strategy.js`           |
 
 ### Client Agent
 
-Configured in `client-agent/config.json`.
+Configured in `client-agent/config.json`:
 
-- **serverUrl**: The public tunnel server URL (e.g., `http://localhost:8080`).
-- **localAppUrl**: The local service you want to expose (e.g., `http://localhost:3000`).
-- **agents**: An array of agent profiles. Each agent creates a separate connection.
-  - `clientId`: Unique identifier for the agent (used in `x-agent-id` header).
-  - `token`: Authentication token for the agent.
+| Key          | Description                              |
+| ------------ | ---------------------------------------- |
+| `serverUrl`  | `http://localhost:8080`                  |
+| `localAppUrl`| `http://localhost:3000`                  |
+| `agents`     | List of agent profiles (`clientId`, `token`) |
+
+---
 
 ## Design Decisions
 
-### 1. Why Plain Node.js for the Client?
+### 1. MongoDB & JWT for Security
 
-The Client Agent is designed to be lightweight and portable. A raw Node.js script has zero boilerplate and can be easily bundled into a binary (using pkg) or run in low-resource environments (containers, IoT devices) without the overhead of a full framework.
+We moved from an open system to a secured architecture. MongoDB stores hashed credentials (using bcrypt), while JWTs provide **stateless authentication**, allowing the tunnel to scale without constant database lookups for every packet.
 
-### 2. Why WebSockets over TCP?
+### 2. Separating Auth from Tunneling
 
-While raw TCP offers slightly better performance, WebSockets provide:
+The `AuthModule` is completely decoupled from the `TunnelGateway`. This **separation of concerns** means we can swap the authentication provider (e.g., to OAuth or API Keys) without breaking the tunneling logic.
 
-- **Message Framing:** We don't have to parse raw byte streams to find where one JSON object ends.
-- **Firewall Traversal:** WebSockets run over port 80/443, which are open on almost all corporate networks.
+### 3. Route Separation (`/auth` vs `/api`)
 
-## Implemented Features
+- `/auth/*` routes are **public** (no JWT required) for registration and login.
+- `/api/*` routes are **protected** and require a valid JWT token.
 
-- **NestJS Implementation:** The Tunnel Server is built entirely in NestJS.
-- **Multiple Clients:** The server maintains a registry of agents and routes traffic based on the `x-agent-id` header.
-- **Authentication:** Agents must provide a valid token during the connection handshake.
+This prevents the wildcard tunnel controller from intercepting authentication requests.
+
+---
+
+## API Reference
+
+### Authentication Endpoints
+
+| Method | Endpoint         | Description          | Auth Required |
+| ------ | ---------------- | -------------------- | ------------- |
+| POST   | `/auth/register` | Create new user      | No            |
+| POST   | `/auth/login`    | Get JWT token        | No            |
+
+### Tunnel Endpoints
+
+| Method | Endpoint   | Description                    | Auth Required |
+| ------ | ---------- | ------------------------------ | ------------- |
+| ALL    | `/api/*`   | Forward to agent via tunnel    | Yes (JWT)     |
+
+---
+
+## Troubleshooting
+
+### 401 Unauthorized on `/auth/register`
+
+**Cause:** The wildcard controller is intercepting auth routes.
+
+**Solution:** Ensure `TunnelController` uses `@Controller('api')` prefix, not `@Controller()`.
+
+### Agent Not Connected
+
+**Cause:** The client agent failed to authenticate with the WebSocket gateway.
+
+**Solution:** Check that the `token` in `config.json` matches one of the valid tokens in `tunnel.gateway.js`.
+
+### MongoDB Connection Error
+
+**Cause:** MongoDB is not running.
+
+**Solution:** Start MongoDB with `mongod` or `brew services start mongodb-community`.

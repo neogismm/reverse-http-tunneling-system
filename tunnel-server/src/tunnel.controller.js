@@ -1,20 +1,33 @@
-import { Controller, All, Req, Res, Dependencies, Bind } from '@nestjs/common';
+import {
+  Controller,
+  All,
+  Req,
+  Res,
+  Dependencies,
+  Bind,
+  UseGuards,
+} from '@nestjs/common';
 import { TunnelGateway } from './tunnel.gateway';
 import { v4 as uuidv4 } from 'uuid';
+import { AuthGuard } from '@nestjs/passport'; // Import AuthGuard
 
-@Controller()
+@Controller('api')
 @Dependencies(TunnelGateway)
 export class TunnelController {
   constructor(tunnelGateway) {
     this.tunnelGateway = tunnelGateway;
   }
 
+  // --- THE SECURITY GUARD ---
+  @UseGuards(AuthGuard('jwt'))
   @All('*')
   @Bind(Req(), Res())
   async handleIncomingRequest(req, res) {
     const requestId = uuidv4();
 
-    // READ ROUTING HEADER
+    // 1. Log the Authenticated User (Added bonus)
+    console.log(`[AUTH] Request from user: ${req.user.username}`);
+
     const targetClientId = req.headers['x-agent-id'];
 
     if (!targetClientId) {
@@ -29,7 +42,7 @@ export class TunnelController {
         req.method,
         req.url,
         req.body,
-        targetClientId, // Pass it to gateway
+        targetClientId,
       );
 
       return res.status(response.status).json(response.data);
